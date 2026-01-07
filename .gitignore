@@ -1,0 +1,5 @@
+__pycache__/
+outputs/
+wandb/
+icae-qwen-0.5b-output/
+Qwen2.5-0.5B-Local/
