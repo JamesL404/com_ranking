@@ -3,3 +3,8 @@ outputs/
 wandb/
 icae-qwen-0.5b-output/
 Qwen2.5-0.5B-Local/
+compressor_training/__pycache__/
+compressor_training/outputs/
+compressor_training/wandb/
+compressor_training/icae-qwen-0.5b-output/
+compressor_training/Qwen2.5-0.5B-Local/
