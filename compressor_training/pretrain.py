@@ -34,6 +34,8 @@ def main():
     if getattr(training_args, "logging_steps", 0) in (0, None):
         training_args.logging_steps = 20
     training_args.logging_first_step = True
+    # Avoid safetensors shared-weight save error during checkpoints.
+    training_args.save_safetensors = False
 
     lora_config = LoraConfig(
         r=model_args.lora_r,

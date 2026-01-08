@@ -60,7 +60,8 @@ def train_model(model, train_dataset, eval_dataset, training_args, data_collator
     print(f"Loaded from the checkpoint: {checkpoint}")
 
     train_result = trainer.train(resume_from_checkpoint=checkpoint)
-    trainer.save_model()
+    # Avoid safetensors shared-weight save error by disabling safetensors.
+    trainer.save_model(safe_serialization=False)
     trainer.log_metrics("train", train_result.metrics)
     metrics = trainer.evaluate()
     trainer.log_metrics("eval", metrics)
