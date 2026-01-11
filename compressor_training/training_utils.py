@@ -1,6 +1,7 @@
 from transformers import Trainer
 import os
 import torch
+import torch.nn as nn
 import random
 from transformers.trainer_utils import get_last_checkpoint
 import math
@@ -24,18 +25,13 @@ def train_model(model, train_dataset, eval_dataset, training_args, data_collator
             )
     
     world_size = int(os.getenv("WORLD_SIZE", "1"))
-    # Keep padding collator when running distributed even if per-device batch is 1,
-    # so that per-rank batches have consistent shape when gathered.
     if world_size == 1 and max(training_args.per_device_train_batch_size, training_args.per_device_eval_batch_size) == 1:
         data_collator = None
         
-    # print training_args at local_rank 0
     local_rank = int(os.getenv('LOCAL_RANK', '0'))
     if local_rank == 0:
         print(training_args)
 
-    # IterableDataset (streaming) + variable-length batches require dispatch_batches=False
-    # Force dispatch_batches off to avoid padding mismatches across ranks with streaming datasets.
     if getattr(training_args, "dispatch_batches", None) is not None:
         if training_args.dispatch_batches:
             setattr(training_args, "dispatch_batches", False)
@@ -60,12 +56,34 @@ def train_model(model, train_dataset, eval_dataset, training_args, data_collator
     print(f"Loaded from the checkpoint: {checkpoint}")
 
     train_result = trainer.train(resume_from_checkpoint=checkpoint)
-    # Avoid safetensors shared-weight save error by disabling safetensors.
-    trainer.save_model(safe_serialization=False)
+    if getattr(training_args, "save_safetensors", False):
+        _untie_shared_embeddings(model)
+    trainer.save_model()
     trainer.log_metrics("train", train_result.metrics)
     metrics = trainer.evaluate()
     trainer.log_metrics("eval", metrics)
     trainer.save_metrics("eval", metrics)
+
+
+def _untie_shared_embeddings(model):
+    def _maybe_untie(module):
+        embed = None
+        lm = None
+        if hasattr(module, "get_input_embeddings"):
+            embed = module.get_input_embeddings()
+        if hasattr(module, "get_output_embeddings"):
+            lm = module.get_output_embeddings()
+        if embed is None or lm is None:
+            return
+        if embed.weight.data_ptr() == lm.weight.data_ptr():
+            lm.weight = nn.Parameter(embed.weight.detach().clone())
+            if hasattr(module, "config"):
+                module.config.tie_word_embeddings = False
+
+    if hasattr(model, "icae"):
+        _maybe_untie(model.icae)
+    if hasattr(model, "decoder"):
+        _maybe_untie(model.decoder)
 
 
 def text_extraction(input_ids, length, lm_ratio=0.0):
@@ -73,16 +91,14 @@ def text_extraction(input_ids, length, lm_ratio=0.0):
     input_len = len(input_ids)
     assert input_len >= 1, f"Error: invalid input length ({input_len})"
     
-    # ae
     if random.random() >= lm_ratio: 
-        if input_len <= length: # if shorter, keep the complete text
+        if input_len <= length:
             return input_ids, []
         else:
             last_start = input_len - length
             random_start = random.randint(0, last_start)
             return input_ids[random_start: random_start+length], []
     
-    # lm    
     if input_len <= length:
         r = random.randint(0, input_len-1)
         return input_ids[:r+1], input_ids[r+1:]
@@ -98,7 +114,7 @@ def pretrain_tokenize_function(examples, model, mem, lm_ratio=0.0):
     new_prompt_answer_ids = []
     new_labels = []
 
-    max_len = model.training_args.model_max_length  # heuristic
+    max_len = model.training_args.model_max_length
 
     for idx in range(len(text_output["input_ids"])):
         if len(text_output["input_ids"][idx]) == 0:
@@ -109,27 +125,26 @@ def pretrain_tokenize_function(examples, model, mem, lm_ratio=0.0):
         num_segments = model.compute_num_segments(length_a)
         total_mem_length = num_segments * model.mem_size
         
-        if len(b) > model.training_args.min_tokens_for_lm:  # avoid too few tokens for lm, which is a waste of computing
+        if len(b) > model.training_args.min_tokens_for_lm:
             ae = False
             b = b[:max_len]
 
         new_input_ids.append(a)
 
-        # decoder part: note that in v2, we add mem_tokens to the prompt_ids for easy implementation; which is different from v1 implementation where mem tokens are not in the prompt_ids
-        if ae:  # autoencoding objective
+        if ae:
             prompt_ids = [mem[0]] * total_mem_length + [model.ae_token_id]
-            answer_ids = a + [model.eos_id]    # if ae, eos token
-        else:   # lm objective
+            answer_ids = a + [model.eos_id]
+        else:
             prompt_ids = [mem[0]] * total_mem_length
             if model.training_args.add_special_token_for_lm:
                 prompt_ids += [model.lm_token_id]
-            answer_ids = b   # if lm, no eos token
+            answer_ids = b
 
         new_prompt_answer_ids.append(prompt_ids + answer_ids)
         if ae:
             labels = [-100] * len(prompt_ids) + answer_ids
         else:
-            labels = [-100] * len(prompt_ids) + [-100] * model.training_args.leave_tokens_for_lm + answer_ids[model.training_args.leave_tokens_for_lm:] # no loss for leave_tokens_for_lm
+            labels = [-100] * len(prompt_ids) + [-100] * model.training_args.leave_tokens_for_lm + answer_ids[model.training_args.leave_tokens_for_lm:]
         new_labels.append(labels)
         assert len(new_prompt_answer_ids[-1]) == len(labels)
         
@@ -146,7 +161,7 @@ def instruct_ft_tokenize_function(examples, model, mem):
     text_output['prompt_answer_ids'] = []
     text_output['labels'] = []
 
-    max_len = model.training_args.model_max_length  # heuristic
+    max_len = model.training_args.model_max_length
 
     for idx in range(len(text_output["input_ids"])):
         
@@ -155,7 +170,7 @@ def instruct_ft_tokenize_function(examples, model, mem):
         total_mem_length = num_segments * model.mem_size
         
         prompt_ids = [mem[0]] * total_mem_length + [model.ft_token_id] + prompt_output['input_ids'][idx]
-        prompt_ids = [1, 733, 16289, 28793] + prompt_ids + [733, 28748, 16289, 28793]   # special formats for prompt in Mistral
+        prompt_ids = [1, 733, 16289, 28793] + prompt_ids + [733, 28748, 16289, 28793]
         answer_ids = label_output['input_ids'][idx] + [model.eos_id]
 
         text_output['prompt_answer_ids'].append(prompt_ids + answer_ids)
@@ -169,10 +184,6 @@ def instruct_ft_tokenize_function(examples, model, mem):
 
 
 class DataCollatorForDynamicPadding:
-    """
-    FIXED: Added max_length parameter to enforce static padding in Multi-GPU environments.
-    Defaults to 5120 to match your tokenizer settings.
-    """
     def __init__(self, pad_token_id, pad_to_multiple_of=None, max_length=5120):
         self.pad_token_id = pad_token_id
         self.pad_to_multiple_of = pad_to_multiple_of
@@ -191,7 +202,6 @@ class DataCollatorForDynamicPadding:
         return batch
 
     def dynamic_padding(self, sequences, fill_value=-100):
-        # FIX: Use self.max_length if available to ensure consistent tensor shapes across GPUs
         if self.max_length is not None:
             max_length = self.max_length
         else:
@@ -203,7 +213,6 @@ class DataCollatorForDynamicPadding:
         padded_sequences = torch.full((len(sequences), max_length), fill_value, dtype=torch.long)
         
         for i, seq in enumerate(sequences):
-            # Safe slice to prevent index errors if a seq is somehow longer than max_length
             end_idx = min(len(seq), max_length)
             padded_sequences[i, :end_idx] = seq[:end_idx]
             
