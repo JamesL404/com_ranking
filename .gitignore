@@ -8,3 +8,5 @@ compressor_training/outputs/
 compressor_training/wandb/
 compressor_training/icae-qwen-0.5b-output/
 compressor_training/Qwen2.5-0.5B-Local/
+compressor_test/Qwen2.5-0.5B*/
+compressor_test/recon_results.json

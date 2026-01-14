@@ -96,7 +96,7 @@ class ICAE(torch.nn.Module):
         self.model_args = model_args
         self.training_args = training_args
         self.model_name = model_args.model_name_or_path
-        attn_impl = {"attn_implementation": "sdpa"}
+        attn_impl = {"attn_implementation": "flash_attention_2"}
         self.icae = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.float16 if training_args.bf16 is False else torch.bfloat16,
@@ -127,7 +127,7 @@ class ICAE(torch.nn.Module):
         self.lm_token_id = self.vocab_size_with_mem + 1
         self.ft_token_id = self.vocab_size_with_mem + 2        
 
-        self.icae.resize_token_embeddings(self.vocab_size_with_mem + 3) 
+        self.icae.resize_token_embeddings(self.vocab_size_with_mem + 3, mean_resizing=False)
         
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=False, trust_remote_code=True)
         self.bos_id = self.icae.config.bos_token_id if self.icae.config.bos_token_id is not None else self.tokenizer.bos_token_id
