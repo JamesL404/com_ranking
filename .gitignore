@@ -10,3 +10,7 @@ compressor_training/icae-qwen-0.5b-output/
 compressor_training/Qwen2.5-0.5B-Local/
 compressor_test/Qwen2.5-0.5B*/
 compressor_test/recon_results.json
+compressor_test/combined_results.json
+compressor_test/combined_results_qwen2p3b_mem8.json
+compressor_training/Qwen2.5-3B-Local/
+*.jsonl

@@ -104,6 +104,14 @@ def main():
     instr_model.generation_config.top_k = None
     instr_model.eval()
 
+    proj = None
+    if compressor.icae.config.hidden_size != instr_model.config.hidden_size:
+        proj = torch.nn.Linear(
+            compressor.icae.config.hidden_size,
+            instr_model.config.hidden_size,
+            bias=False,
+        ).to(device=device, dtype=instr_model.dtype)
+
     passages = []
     if args.passage:
         passages = [args.passage]
@@ -123,7 +131,10 @@ def main():
             prompt_ids = build_prompt(instr_tokenizer, instruction).to(device)
             prompt_embs = instr_model.get_input_embeddings()(prompt_ids)
 
-            inputs_embeds = torch.cat([memory_slots.to(prompt_embs), prompt_embs], dim=1)
+            mem_embs = memory_slots.to(prompt_embs)
+            if proj is not None:
+                mem_embs = proj(mem_embs)
+            inputs_embeds = torch.cat([mem_embs, prompt_embs], dim=1)
             attention_mask = torch.ones(inputs_embeds.shape[:2], device=device)
 
             output_ids = instr_model.generate(
