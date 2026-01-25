@@ -1,8 +1,8 @@
 from transformers import Trainer
 import os
 import torch
-import torch.nn as nn
 import random
+
 from transformers.trainer_utils import get_last_checkpoint
 import math
 
@@ -28,15 +28,15 @@ def train_model(model, train_dataset, eval_dataset, training_args, data_collator
     if world_size == 1 and max(training_args.per_device_train_batch_size, training_args.per_device_eval_batch_size) == 1:
         data_collator = None
         
+    # print training_args at local_rank 0
     local_rank = int(os.getenv('LOCAL_RANK', '0'))
     if local_rank == 0:
         print(training_args)
 
     if getattr(training_args, "dispatch_batches", None) is not None:
-        if training_args.dispatch_batches:
-            setattr(training_args, "dispatch_batches", False)
-            if local_rank == 0:
-                print("Setting dispatch_batches=False to avoid batch concat errors with streaming/variable-length data.")
+        training_args.dispatch_batches = False
+    if getattr(training_args, "split_batches", None) is not None:
+        training_args.split_batches = False
 
     trainer = Trainer(
         model=model,
@@ -56,8 +56,6 @@ def train_model(model, train_dataset, eval_dataset, training_args, data_collator
     print(f"Loaded from the checkpoint: {checkpoint}")
 
     train_result = trainer.train(resume_from_checkpoint=checkpoint)
-    if getattr(training_args, "save_safetensors", False):
-        _untie_shared_embeddings(model)
     trainer.save_model()
     trainer.log_metrics("train", train_result.metrics)
     metrics = trainer.evaluate()
@@ -65,40 +63,21 @@ def train_model(model, train_dataset, eval_dataset, training_args, data_collator
     trainer.save_metrics("eval", metrics)
 
 
-def _untie_shared_embeddings(model):
-    def _maybe_untie(module):
-        embed = None
-        lm = None
-        if hasattr(module, "get_input_embeddings"):
-            embed = module.get_input_embeddings()
-        if hasattr(module, "get_output_embeddings"):
-            lm = module.get_output_embeddings()
-        if embed is None or lm is None:
-            return
-        if embed.weight.data_ptr() == lm.weight.data_ptr():
-            lm.weight = nn.Parameter(embed.weight.detach().clone())
-            if hasattr(module, "config"):
-                module.config.tie_word_embeddings = False
-
-    if hasattr(model, "icae"):
-        _maybe_untie(model.icae)
-    if hasattr(model, "decoder"):
-        _maybe_untie(model.decoder)
-
-
 def text_extraction(input_ids, length, lm_ratio=0.0):
     
     input_len = len(input_ids)
     assert input_len >= 1, f"Error: invalid input length ({input_len})"
     
+    # ae
     if random.random() >= lm_ratio: 
-        if input_len <= length:
+        if input_len <= length: # if shorter, keep the complete text
             return input_ids, []
         else:
             last_start = input_len - length
             random_start = random.randint(0, last_start)
             return input_ids[random_start: random_start+length], []
     
+    # lm    
     if input_len <= length:
         r = random.randint(0, input_len-1)
         return input_ids[:r+1], input_ids[r+1:]
@@ -110,47 +89,43 @@ def text_extraction(input_ids, length, lm_ratio=0.0):
 
 def pretrain_tokenize_function(examples, model, mem, lm_ratio=0.0):
     text_output = model.tokenizer(examples["text"], truncation=False, padding=False, return_attention_mask=False)
-    new_input_ids = []
-    new_prompt_answer_ids = []
-    new_labels = []
+    text_output['prompt_answer_ids'] = []
+    text_output['labels'] = []
 
-    max_len = model.training_args.model_max_length
+    max_len = model.training_args.model_max_length  # heuristic
 
     for idx in range(len(text_output["input_ids"])):
-        if len(text_output["input_ids"][idx]) == 0:
-            continue
+        
         ae = True
         a, b = text_extraction(text_output["input_ids"][idx], max_len, lm_ratio=lm_ratio)
         length_a = len(a)
         num_segments = model.compute_num_segments(length_a)
         total_mem_length = num_segments * model.mem_size
         
-        if len(b) > model.training_args.min_tokens_for_lm:
+        if len(b) > model.training_args.min_tokens_for_lm:  # avoid too few tokens for lm, which is a waste of computing
             ae = False
             b = b[:max_len]
 
-        new_input_ids.append(a)
+        text_output['input_ids'][idx] = a
 
-        if ae:
+        # decoder part: note that in v2, we add mem_tokens to the prompt_ids for easy implementation; which is different from v1 implementation where mem tokens are not in the prompt_ids
+        if ae:  # autoencoding objective
             prompt_ids = [mem[0]] * total_mem_length + [model.ae_token_id]
-            answer_ids = a + [model.eos_id]
-        else:
+            answer_ids = a + [model.eos_id]    # if ae, eos token
+        else:   # lm objective
             prompt_ids = [mem[0]] * total_mem_length
             if model.training_args.add_special_token_for_lm:
                 prompt_ids += [model.lm_token_id]
-            answer_ids = b
+            answer_ids = b   # if lm, no eos token
 
-        new_prompt_answer_ids.append(prompt_ids + answer_ids)
+        text_output['prompt_answer_ids'].append(prompt_ids + answer_ids)
         if ae:
             labels = [-100] * len(prompt_ids) + answer_ids
         else:
-            labels = [-100] * len(prompt_ids) + [-100] * model.training_args.leave_tokens_for_lm + answer_ids[model.training_args.leave_tokens_for_lm:]
-        new_labels.append(labels)
-        assert len(new_prompt_answer_ids[-1]) == len(labels)
+            labels = [-100] * len(prompt_ids) + [-100] * model.training_args.leave_tokens_for_lm + answer_ids[model.training_args.leave_tokens_for_lm:] # no loss for leave_tokens_for_lm
+        text_output['labels'].append(labels)
+        assert len(text_output['prompt_answer_ids'][-1]) == len(labels)
         
-    text_output["input_ids"] = new_input_ids
-    text_output["prompt_answer_ids"] = new_prompt_answer_ids
-    text_output["labels"] = new_labels
     return text_output
 
 
@@ -161,7 +136,7 @@ def instruct_ft_tokenize_function(examples, model, mem):
     text_output['prompt_answer_ids'] = []
     text_output['labels'] = []
 
-    max_len = model.training_args.model_max_length
+    max_len = model.training_args.model_max_length  # heuristic
 
     for idx in range(len(text_output["input_ids"])):
         
@@ -170,7 +145,7 @@ def instruct_ft_tokenize_function(examples, model, mem):
         total_mem_length = num_segments * model.mem_size
         
         prompt_ids = [mem[0]] * total_mem_length + [model.ft_token_id] + prompt_output['input_ids'][idx]
-        prompt_ids = [1, 733, 16289, 28793] + prompt_ids + [733, 28748, 16289, 28793]
+        prompt_ids = [1, 733, 16289, 28793] + prompt_ids + [733, 28748, 16289, 28793]   # special formats for prompt in Mistral
         answer_ids = label_output['input_ids'][idx] + [model.eos_id]
 
         text_output['prompt_answer_ids'].append(prompt_ids + answer_ids)
@@ -184,36 +159,28 @@ def instruct_ft_tokenize_function(examples, model, mem):
 
 
 class DataCollatorForDynamicPadding:
-    def __init__(self, pad_token_id, pad_to_multiple_of=None, max_length=5120):
+    def __init__(self, pad_token_id, pad_to_multiple_of=None, max_length=None):
         self.pad_token_id = pad_token_id
         self.pad_to_multiple_of = pad_to_multiple_of
         self.max_length = max_length
-
     def __call__(self, examples):
         input_ids = [torch.tensor(example["input_ids"], dtype=torch.long) for example in examples]
         labels = [torch.tensor(example["labels"], dtype=torch.long) for example in examples]
         prompt_answer_ids = [torch.tensor(example["prompt_answer_ids"], dtype=torch.long) for example in examples]
-        
         input_ids = self.dynamic_padding(input_ids, fill_value=self.pad_token_id)
         prompt_answer_ids = self.dynamic_padding(prompt_answer_ids, fill_value=self.pad_token_id)
         labels = self.dynamic_padding(labels)
-        
         batch = {"input_ids": input_ids, "labels": labels, "prompt_answer_ids": prompt_answer_ids}
         return batch
-
     def dynamic_padding(self, sequences, fill_value=-100):
         if self.max_length is not None:
             max_length = self.max_length
         else:
             max_length = max(len(x) for x in sequences)
-            
         if self.pad_to_multiple_of:
             max_length = ((max_length - 1) // self.pad_to_multiple_of + 1) * self.pad_to_multiple_of
-            
         padded_sequences = torch.full((len(sequences), max_length), fill_value, dtype=torch.long)
-        
         for i, seq in enumerate(sequences):
             end_idx = min(len(seq), max_length)
             padded_sequences[i, :end_idx] = seq[:end_idx]
-            
         return padded_sequences

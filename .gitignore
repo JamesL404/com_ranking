@@ -13,4 +13,5 @@ compressor_test/recon_results.json
 compressor_test/combined_results.json
 compressor_test/combined_results_qwen2p3b_mem8.json
 compressor_training/Qwen2.5-3B-Local/
+compressor_training/Qwen2.5-7B-Local/
 *.jsonl
