@@ -25,6 +25,8 @@ def main():
     if hasattr(training_args, "split_batches"):
         training_args.split_batches = False
     training_args.dataloader_num_workers = 0
+    training_args.save_lora_only = True
+    training_args.save_strategy = "no"
 
     lora_config = LoraConfig(
         r=model_args.lora_r,

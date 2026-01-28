@@ -56,7 +56,10 @@ def train_model(model, train_dataset, eval_dataset, training_args, data_collator
     print(f"Loaded from the checkpoint: {checkpoint}")
 
     train_result = trainer.train(resume_from_checkpoint=checkpoint)
-    trainer.save_model()
+    if getattr(training_args, "save_lora_only", False):
+        _save_lora_only(model, training_args.output_dir)
+    else:
+        trainer.save_model()
     trainer.log_metrics("train", train_result.metrics)
     metrics = trainer.evaluate()
     trainer.log_metrics("eval", metrics)
@@ -127,6 +130,14 @@ def pretrain_tokenize_function(examples, model, mem, lm_ratio=0.0):
         assert len(text_output['prompt_answer_ids'][-1]) == len(labels)
         
     return text_output
+
+
+def _save_lora_only(model, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    if hasattr(model, "icae"):
+        model.icae.save_pretrained(output_dir)
+    if hasattr(model, "memory_token_embed"):
+        torch.save(model.memory_token_embed.state_dict(), os.path.join(output_dir, "memory_token_embed.pt"))
 
 
 def instruct_ft_tokenize_function(examples, model, mem):

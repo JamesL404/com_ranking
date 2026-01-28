@@ -76,6 +76,10 @@ class TrainingArguments(transformers.TrainingArguments):
         default="",
         metadata={"help": "The checkpoint that should be restored from for fine-tuning"}
     )
+    save_lora_only: bool = field(
+        default=False,
+        metadata={"help": "Save LoRA adapter and memory embeddings only."}
+    )
 
 def print_trainable_parameters(model):
     trainable_parameters = 0
