@@ -54,9 +54,10 @@ with torch.no_grad():
 
             prompt_answer_embs = model.tokens_to_embeddings(prompt_ids)
             memory_slots = memory_slots.to(prompt_answer_embs)
+            if memory_slots.dim() == 2:
+                memory_slots = memory_slots.unsqueeze(0)
                         
             # Concatenate and clone input embeddings
-            # memory_slots already has batch dimension
             decoder_input_embeddings = torch.cat((memory_slots, prompt_answer_embs), dim=1)
             output = decoder_input_embeddings.clone()
 

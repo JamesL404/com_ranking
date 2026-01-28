@@ -15,3 +15,6 @@ compressor_test/combined_results_qwen2p3b_mem8.json
 compressor_training/Qwen2.5-3B-Local/
 compressor_training/Qwen2.5-7B-Local/
 *.jsonl
+compressor_test/Mistral-7B-Instruct-v0.2/
+compressor_test/mistral_7b_pretrained_icae.safetensors
+compressor_training/tmp.out
